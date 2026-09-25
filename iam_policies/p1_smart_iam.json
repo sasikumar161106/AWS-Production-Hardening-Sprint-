@@ -1,0 +1,378 @@
+{
+  "project_id": "P1",
+  "project_name": "Smart Leave & Absence Management System (SLAMS)",
+  "description": "Serverless multi-level employee leave management and approval system.",
+  "roles": [
+    {
+      "function_name": "submitLeaveRequest",
+      "role_name": "SLAMS-SubmitLeaveRequest-Role",
+      "purpose": "Validates request payload, queries employee balances and existing bookings for overlap, auto-rejects or starts Step Functions workflow.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "WildcardDynamoDBAccess",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "WildcardStatesAccess",
+            "Effect": "Allow",
+            "Action": "states:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "WildcardSESAccess",
+            "Effect": "Allow",
+            "Action": "ses:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "WildcardLogs",
+            "Effect": "Allow",
+            "Action": "logs:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedDynamoDBReadBalancesAndRequests",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:Query"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_balances",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests/index/*"
+            ]
+          },
+          {
+            "Sid": "ScopedDynamoDBWriteRequestsOnly",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:PutItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests"
+          },
+          {
+            "Sid": "EnforceSingleWriterOnBalances",
+            "Effect": "Deny",
+            "Action": [
+              "dynamodb:UpdateItem",
+              "dynamodb:DeleteItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_balances"
+          },
+          {
+            "Sid": "ScopedStepFunctionsStartExecution",
+            "Effect": "Allow",
+            "Action": "states:StartExecution",
+            "Resource": "arn:aws:states:ap-south-1:123456789012:stateMachine:SLAMS-Approval-StateMachine"
+          },
+          {
+            "Sid": "ScopedSESNotification",
+            "Effect": "Allow",
+            "Action": "ses:SendEmail",
+            "Resource": "arn:aws:ses:ap-south-1:123456789012:identity/notifications@slams-corp.internal"
+          },
+          {
+            "Sid": "ScopedCloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/submitLeaveRequest:*"
+          }
+        ]
+      },
+      "risk_analysis": "Eliminated full account administrative DynamoDB, Step Functions, and SES permissions. Restricted writes strictly to 'leave_requests'. Explicitly enforced the Single-Writer Principle by adding an explicit Deny on 'leave_balances' mutation, ensuring only finalizeApprovalRequest can alter balances."
+    },
+    {
+      "function_name": "approveRejectRequest",
+      "role_name": "SLAMS-ApproveRejectRequest-Role",
+      "purpose": "Verifies HMAC cryptographic token from email callback link and sends task success/failure to paused Step Functions execution.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "FullSecretsManagerAccess",
+            "Effect": "Allow",
+            "Action": "secretsmanager:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "FullStepFunctionsAccess",
+            "Effect": "Allow",
+            "Action": "states:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "FullDynamoDBAccess",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedSecretsManagerReadSecretOnly",
+            "Effect": "Allow",
+            "Action": "secretsmanager:GetSecretValue",
+            "Resource": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:smart-leave/approval-token-*"
+          },
+          {
+            "Sid": "ScopedStepFunctionsResumeTask",
+            "Effect": "Allow",
+            "Action": [
+              "states:SendTaskSuccess",
+              "states:SendTaskFailure"
+            ],
+            "Resource": "arn:aws:states:ap-south-1:123456789012:stateMachine:SLAMS-Approval-StateMachine"
+          },
+          {
+            "Sid": "ScopedDynamoDBUpdateLeaveStatus",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:UpdateItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests"
+          },
+          {
+            "Sid": "ScopedCloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/approveRejectRequest:*"
+          }
+        ]
+      },
+      "risk_analysis": "Revoked full administrative access across Secrets Manager and Step Functions. Restricted Secrets Manager to GetSecretValue on the specific approval-token secret; limited Step Functions actions strictly to callback resumption (SendTaskSuccess/SendTaskFailure) and scoped DynamoDB mutations to leave_requests."
+    },
+    {
+      "function_name": "finalizeApprovalRequest",
+      "role_name": "SLAMS-FinalizeApprovalRequest-Role",
+      "purpose": "Designated authoritative single-writer for employee balance deduction and final status transition.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "WildcardDynamoDB",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "AuthoritativeBalanceUpdater",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:UpdateItem",
+              "dynamodb:GetItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_balances",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests"
+            ]
+          },
+          {
+            "Sid": "ScopedCloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/finalizeApprovalRequest:*"
+          }
+        ]
+      },
+      "risk_analysis": "Eliminated table scanning and wildcard access across all account tables. Granted precise UpdateItem and GetItem rights on leave_balances and leave_requests, upholding data integrity and audit compliance."
+    },
+    {
+      "function_name": "reportsCalendar",
+      "role_name": "SLAMS-ReportsCalendar-Role",
+      "purpose": "Queries leave balances, approved employee requests, and departmental calendar views.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "WildcardDynamoDB",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ReadOnlyDynamoDBAccess",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:Query",
+              "dynamodb:BatchGetItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests/index/*",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_balances",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_config"
+            ]
+          },
+          {
+            "Sid": "HRAdminConfigUpdateOnly",
+            "Effect": "Allow",
+            "Action": "dynamodb:PutItem",
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_config"
+          },
+          {
+            "Sid": "ScopedCloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/reportsCalendar:*"
+          }
+        ]
+      },
+      "risk_analysis": "Eliminated full write/delete capabilities on operational tables. Confined write actions solely to leave_config for HRAdmin settings, while restricting query operations to GSIs."
+    },
+    {
+      "function_name": "notifyManager / notifyHRAdmin",
+      "role_name": "SLAMS-Notifications-Role",
+      "purpose": "Fetches approval signing secret and sends push alerts via SNS topic and emails via SES.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "WildcardSNSAndSES",
+            "Effect": "Allow",
+            "Action": [
+              "sns:*",
+              "ses:*",
+              "secretsmanager:*"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedSNSPublish",
+            "Effect": "Allow",
+            "Action": "sns:Publish",
+            "Resource": "arn:aws:sns:ap-south-1:123456789012:ManagerApprovalTopic"
+          },
+          {
+            "Sid": "ScopedSESSend",
+            "Effect": "Allow",
+            "Action": [
+              "ses:SendEmail",
+              "ses:SendRawEmail"
+            ],
+            "Resource": "arn:aws:ses:ap-south-1:123456789012:identity/notifications@slams-corp.internal"
+          },
+          {
+            "Sid": "ScopedSecretsManagerRead",
+            "Effect": "Allow",
+            "Action": "secretsmanager:GetSecretValue",
+            "Resource": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:smart-leave/approval-token-*"
+          },
+          {
+            "Sid": "ScopedCloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/notify*:*"
+          }
+        ]
+      },
+      "risk_analysis": "Removed broad permissions to publish to arbitrary SNS topics or send unauthorized emails from any unverified domain. Restricted Secrets Manager access solely to reading the token secret."
+    },
+    {
+      "function_name": "carryForwardAndSummary",
+      "role_name": "SLAMS-CarryForwardAndSummary-Role",
+      "purpose": "Scheduled EventBridge cron function calculating leave carry-forwards and generating weekly HR digests.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "WildcardAccess",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:*",
+              "ses:*"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedBalancesMaintenance",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:Scan",
+              "dynamodb:UpdateItem",
+              "dynamodb:GetItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_balances"
+          },
+          {
+            "Sid": "ScopedRequestsSummaryRead",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:Query",
+              "dynamodb:GetItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/leave_requests/index/*"
+            ]
+          },
+          {
+            "Sid": "ScopedSESDigest",
+            "Effect": "Allow",
+            "Action": "ses:SendEmail",
+            "Resource": "arn:aws:ses:ap-south-1:123456789012:identity/notifications@slams-corp.internal"
+          },
+          {
+            "Sid": "ScopedCloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/carryForwardAndSummary:*"
+          }
+        ]
+      },
+      "risk_analysis": "Constrained table operations strictly to leave_balances and leave_requests, preventing cross-table data corruption; scoped email dispatch to verified corporate sender."
+    }
+  ]
+}

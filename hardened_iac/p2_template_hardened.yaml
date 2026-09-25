@@ -1,0 +1,297 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Employee Learning & Skill Certification Tracker - Hardened Production Template (Sprint 5)
+  Audited & Hardened by: Sasikumar (Sasi) — Cloud Architect & Security Specialist
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  SenderEmail:
+    Type: String
+    Default: "cert-issuer@company.com"
+    Description: Verified SES email identity for certificate issuance
+
+Globals:
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,OPTIONS'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'https://learning.internal.company.com'"
+    Auth:
+      DefaultAuthorizer: CognitoAuthorizer
+      Authorizers:
+        CognitoAuthorizer:
+          UserPoolArn: !GetAtt LMSUserPool.Arn
+          Identity:
+            Header: Authorization
+  Function:
+    Timeout: 15
+    Runtime: nodejs20.x
+    MemorySize: 512
+    Tracing: Active
+    Environment:
+      Variables:
+        COMPLETIONS_TABLE: !Ref CompletionsTable
+        QUIZZES_TABLE: !Ref QuizzesTable
+        CERTIFICATES_TABLE: !Ref CertificatesTable
+        CERTIFICATE_BUCKET: !Ref CertificatesBucket
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # COGNITO IDENTITY SPINE: User Pool & Client (Hardened)
+  # ---------------------------------------------------------------------------
+  LMSUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub lms-user-pool-${Environment}
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+
+  LMSUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub lms-web-client-${Environment}
+      UserPoolId: !Ref LMSUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+
+  # ---------------------------------------------------------------------------
+  # DYNAMODB TABLES (Hardened: PITR & KMS Server-Side Encryption)
+  # ---------------------------------------------------------------------------
+  QuizzesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: course_id
+          AttributeType: S
+        - AttributeName: question_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: course_id
+          KeyType: HASH
+        - AttributeName: question_id
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  CompletionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: employee_id
+          AttributeType: S
+        - AttributeName: course_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: employee_id
+          KeyType: HASH
+        - AttributeName: course_id
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  CertificatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: certificate_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: certificate_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # S3 BUCKET (Hardened: Public Access Blocked, AES256 SSE, In-Transit TLS)
+  # ---------------------------------------------------------------------------
+  CertificatesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNonCurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+
+  CertificatesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CertificatesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnforceTLSRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${CertificatesBucket}"
+              - !Sub "arn:aws:s3:::${CertificatesBucket}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # ---------------------------------------------------------------------------
+  # LAMBDA FUNCTIONS (Hardened: Least-Privilege IAM & Cognito Auth on Routes)
+  # ---------------------------------------------------------------------------
+  QuizManagementFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/quiz-management/
+      Handler: app.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt QuizzesTable.Arn
+      Events:
+        CreateQuiz:
+          Type: Api
+          Properties:
+            Path: /courses/{course_id}/quiz
+            Method: post
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GetQuiz:
+          Type: Api
+          Properties:
+            Path: /courses/{course_id}/quiz
+            Method: get
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  QuizGradingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/quiz-grading/
+      Handler: app.handler
+      Environment:
+        Variables:
+          CERTIFICATE_GENERATION_FUNCTION_NAME: !Ref CertificateGenerationFunction
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt CompletionsTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+              Resource: !GetAtt QuizzesTable.Arn
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !GetAtt CertificateGenerationFunction.Arn
+      Events:
+        SubmitQuiz:
+          Type: Api
+          Properties:
+            Path: /courses/{course_id}/quiz/submit
+            Method: post
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  CertificateGenerationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/certificate-generation/
+      Handler: app.handler
+      Environment:
+        Variables:
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt CertificatesTable.Arn
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !Sub "${CertificatesBucket.Arn}/certificates/*"
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}"
+
+  # VerificationFunction: Documented Intentional Public Exemption
+  VerificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/verification/
+      Handler: app.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt CertificatesTable.Arn
+      Events:
+        VerifyCert:
+          Type: Api
+          Properties:
+            Path: /verify/{cert_id}
+            Method: get
+            Auth:
+              Authorizer: NONE # Documented public verification endpoint
+
+Outputs:
+  ApiEndpoint:
+    Description: "Hardened API Gateway endpoint URL"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref LMSUserPool
+  UserPoolClientId:
+    Description: "Cognito App Client ID"
+    Value: !Ref LMSUserPoolClient

@@ -1,0 +1,419 @@
+{
+  "project_id": "P4",
+  "project_name": "AI-Powered Resume Screener & Talent Acquisition Pipeline",
+  "description": "Cloud-native NLP pipeline parsing resumes via Textract and Comprehend, scoring against JDs, and managing dead-letter redrive.",
+  "roles": [
+    {
+      "function_name": "IngestionFunction",
+      "role_name": "ResumeScreener-Ingestion-Role",
+      "purpose": "Generates pre-signed upload URLs, extracts text via Textract synchronous/asynchronous APIs, and records candidate records.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "S3CrudPolicy",
+            "Effect": "Allow",
+            "Action": "s3:*",
+            "Resource": "arn:aws:s3:::resume-screener-prod-123456789012-ap-south-1/*"
+          },
+          {
+            "Sid": "DynamoDBCrud",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "TextractWildcard",
+            "Effect": "Allow",
+            "Action": "textract:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "LambdaInvoke",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedS3ResumeBucketPrefixes",
+            "Effect": "Allow",
+            "Action": [
+              "s3:PutObject",
+              "s3:GetObject"
+            ],
+            "Resource": [
+              "arn:aws:s3:::resume-screener-prod-123456789012-ap-south-1/resumes/*",
+              "arn:aws:s3:::resume-screener-prod-123456789012-ap-south-1/extracted/*"
+            ]
+          },
+          {
+            "Sid": "ScopedDynamoDBCandidatesAndFailures",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:PutItem",
+              "dynamodb:UpdateItem",
+              "dynamodb:GetItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/candidates-prod",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/failed_jobs-prod"
+            ]
+          },
+          {
+            "Sid": "TextractDocumentedServiceLimitation",
+            "Effect": "Allow",
+            "Action": [
+              "textract:DetectDocumentText",
+              "textract:StartDocumentTextDetection",
+              "textract:GetDocumentTextDetection"
+            ],
+            "Resource": "*",
+            "Condition": {
+              "StringEquals": {
+                "aws:PrincipalAccount": "123456789012",
+                "aws:RequestedRegion": "ap-south-1"
+              }
+            }
+          },
+          {
+            "Sid": "ScopedInvokeNlpLambda",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": "arn:aws:lambda:ap-south-1:123456789012:function:resume-screener-nlp-prod"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/resume-screener-ingestion-prod:*"
+          }
+        ]
+      },
+      "risk_analysis": "Constrained S3 operations strictly to 'resumes/*' and 'extracted/*' key prefixes. Scoped DynamoDB to candidates-prod and failed_jobs-prod. Documented Textract service limitation (Textract APIs do not support resource-level ARNs) and mitigated by enforcing aws:PrincipalAccount and aws:RequestedRegion conditions."
+    },
+    {
+      "function_name": "NlpParserFunction",
+      "role_name": "ResumeScreener-NlpParser-Role",
+      "purpose": "Extracts entities via Comprehend, normalizes candidate metadata, masks PII, and publishes parsed payloads to SQS scoring queue.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "S3Wildcard",
+            "Effect": "Allow",
+            "Action": "s3:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "DynamoDBCrud",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "ComprehendWildcard",
+            "Effect": "Allow",
+            "Action": "comprehend:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "SQSWildcard",
+            "Effect": "Allow",
+            "Action": "sqs:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedS3ExtractedRead",
+            "Effect": "Allow",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::resume-screener-prod-123456789012-ap-south-1/extracted/*"
+          },
+          {
+            "Sid": "ScopedDynamoDBUpdateCandidateNlp",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:UpdateItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/candidates-prod",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/failed_jobs-prod"
+            ]
+          },
+          {
+            "Sid": "ComprehendDocumentedServiceLimitation",
+            "Effect": "Allow",
+            "Action": [
+              "comprehend:DetectEntities",
+              "comprehend:DetectKeyPhrases",
+              "comprehend:DetectDominantLanguage"
+            ],
+            "Resource": "*",
+            "Condition": {
+              "StringEquals": {
+                "aws:PrincipalAccount": "123456789012",
+                "aws:RequestedRegion": "ap-south-1"
+              }
+            }
+          },
+          {
+            "Sid": "ScopedSQSPublishToScoringQueue",
+            "Effect": "Allow",
+            "Action": "sqs:SendMessage",
+            "Resource": "arn:aws:sqs:ap-south-1:123456789012:resume-screener-scoring-queue-prod"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/resume-screener-nlp-prod:*"
+          }
+        ]
+      },
+      "risk_analysis": "Revoked full S3 and SQS administrative privileges. Scoped SQS strictly to SendMessage on the scoring queue. Documented Comprehend service limitation (APIs do not support resource-level permissions) and constrained execution using aws:PrincipalAccount condition."
+    },
+    {
+      "function_name": "ScoringFunction",
+      "role_name": "ResumeScreener-Scoring-Role",
+      "purpose": "Consumes candidate payload from SQS, evaluates qualifications against Job Description, and records detailed score breakdown.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "DynamoDBAll",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "SQSAll",
+            "Effect": "Allow",
+            "Action": "sqs:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedDynamoDBReadJobsWriteScores",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/jobs-prod"
+          },
+          {
+            "Sid": "ScopedCandidateScoreUpdate",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:UpdateItem",
+              "dynamodb:GetItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/candidates-prod"
+          },
+          {
+            "Sid": "ScopedFailureLog",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:PutItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/failed_jobs-prod"
+          },
+          {
+            "Sid": "ScopedSQSConsumeScoringQueue",
+            "Effect": "Allow",
+            "Action": [
+              "sqs:ReceiveMessage",
+              "sqs:DeleteMessage",
+              "sqs:GetQueueAttributes"
+            ],
+            "Resource": "arn:aws:sqs:ap-south-1:123456789012:resume-screener-scoring-queue-prod"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/resume-screener-scoring-prod:*"
+          }
+        ]
+      },
+      "risk_analysis": "Eliminated wildcard table access; granted read-only to jobs-prod and write to candidates-prod. Scoped SQS permissions to Receive/Delete on the scoring queue only."
+    },
+    {
+      "function_name": "ReliabilityFunction",
+      "role_name": "ResumeScreener-Reliability-Role",
+      "purpose": "Consumes DLQ poison messages, provides failed-job APIs, logs audit events, and redrives jobs to scoring or NLP.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "DynamoDBAll",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "SQSAll",
+            "Effect": "Allow",
+            "Action": "sqs:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "LambdaAll",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedDynamoDBReliabilityAndAudit",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:PutItem",
+              "dynamodb:UpdateItem",
+              "dynamodb:Query",
+              "dynamodb:Scan"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/failed_jobs-prod",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/failed_jobs-prod/index/*",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/audit_events-prod",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/candidates-prod"
+            ]
+          },
+          {
+            "Sid": "ScopedSQSRedriveAndDLQ",
+            "Effect": "Allow",
+            "Action": [
+              "sqs:SendMessage"
+            ],
+            "Resource": "arn:aws:sqs:ap-south-1:123456789012:resume-screener-scoring-queue-prod"
+          },
+          {
+            "Sid": "ScopedSQSDLQConsume",
+            "Effect": "Allow",
+            "Action": [
+              "sqs:ReceiveMessage",
+              "sqs:DeleteMessage",
+              "sqs:GetQueueAttributes"
+            ],
+            "Resource": "arn:aws:sqs:ap-south-1:123456789012:resume-screener-dlq-prod"
+          },
+          {
+            "Sid": "ScopedRedriveLambdaInvoke",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": [
+              "arn:aws:lambda:ap-south-1:123456789012:function:resume-screener-nlp-prod",
+              "arn:aws:lambda:ap-south-1:123456789012:function:resume-screener-ingestion-prod"
+            ]
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/resume-screener-reliability-prod:*"
+          }
+        ]
+      },
+      "risk_analysis": "Revoked universal Lambda invoke rights. Scoped target redrive functions specifically to NLP and Ingestion ARNs. Divided SQS queue rights between SendMessage on main queue and ReceiveMessage on DLQ."
+    },
+    {
+      "function_name": "ApiFunction",
+      "role_name": "ResumeScreener-ApiBackend-Role",
+      "purpose": "REST API backend managing job requisitions, candidate pipelines, shortlists, and SES interview invites.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "DynamoDBCrud",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "SESWildcardIdentity",
+            "Effect": "Allow",
+            "Action": [
+              "ses:SendEmail",
+              "ses:SendRawEmail",
+              "ses:SendTemplatedEmail"
+            ],
+            "Resource": "arn:aws:ses:ap-south-1:123456789012:identity/*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedDynamoDBApiOperations",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:PutItem",
+              "dynamodb:UpdateItem",
+              "dynamodb:Query"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/jobs-prod",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/jobs-prod/index/*",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/candidates-prod",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/candidates-prod/index/*",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/audit_events-prod"
+            ]
+          },
+          {
+            "Sid": "ScopedSESExactVerifiedSender",
+            "Effect": "Allow",
+            "Action": [
+              "ses:SendEmail",
+              "ses:SendRawEmail",
+              "ses:SendTemplatedEmail"
+            ],
+            "Resource": "arn:aws:ses:ap-south-1:123456789012:identity/recruiter-noreply@company.com"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/resume-screener-api-backend-prod:*"
+          }
+        ]
+      },
+      "risk_analysis": "Eliminated trailing wildcard 'identity/*' on SES, constraining email sending rights to the single verified corporate sender ARN. Scoped DynamoDB operations to exact table ARNs and GSIs."
+    }
+  ]
+}

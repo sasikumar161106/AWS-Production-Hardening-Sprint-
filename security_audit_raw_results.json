@@ -1,0 +1,388 @@
+{
+  "p1": {
+    "project": "Project 1: Smart Leave & Absence Management System (SLAMS)",
+    "lambdas": [
+      "submitLeaveRequest",
+      "approveRejectRequest",
+      "finalizeApprovalRequest",
+      "reportsCalendar",
+      "notifyManager",
+      "carryForwardAndSummary"
+    ],
+    "tables": [
+      "leave_requests",
+      "leave_balances",
+      "leave_config"
+    ],
+    "s3_buckets": [
+      "slams-frontend-hosting-ap-south-1"
+    ],
+    "api_routes": [
+      {
+        "path": "POST /leave-requests",
+        "auth_required": true,
+        "target": "submitLeaveRequest"
+      },
+      {
+        "path": "POST /leave-requests/{request_id}/cancel",
+        "auth_required": true,
+        "target": "submitLeaveRequest"
+      },
+      {
+        "path": "GET /approve",
+        "auth_required": false,
+        "target": "approveRejectRequest",
+        "exemption_reason": "Email one-click manager approval webhook authenticated via cryptographic HMAC-SHA256 token and single-use nonce"
+      },
+      {
+        "path": "GET /balances/{employee_id}",
+        "auth_required": true,
+        "target": "reportsCalendar"
+      },
+      {
+        "path": "GET /leave-requests/{employee_id}",
+        "auth_required": true,
+        "target": "reportsCalendar"
+      },
+      {
+        "path": "GET /approvals/pending",
+        "auth_required": true,
+        "target": "reportsCalendar"
+      },
+      {
+        "path": "GET /calendar",
+        "auth_required": true,
+        "target": "reportsCalendar"
+      },
+      {
+        "path": "GET /config/leave-types",
+        "auth_required": true,
+        "target": "reportsCalendar"
+      },
+      {
+        "path": "PUT /config/leave-types",
+        "auth_required": true,
+        "target": "reportsCalendar"
+      }
+    ],
+    "iam_wildcard_findings": [
+      {
+        "role": "Default Lambda Role / Initial Execution Role",
+        "finding": "Overly permissive AWS managed policies (AmazonDynamoDBFullAccess, AWSStepFunctionsFullAccess, AmazonSNSFullAccess) and wildcard Action: '*' and Resource: '*'",
+        "severity": "CRITICAL",
+        "remediation": "Replaced with granular IAM policies restricting DynamoDB actions per table ARN, Secrets Manager GetSecretValue on specific secret ARN, and State Machine StartExecution / SendTaskSuccess."
+      }
+    ],
+    "storage_security": {
+      "dynamodb_pitr": "Required (Enabled via UpdateContinuousBackups)",
+      "dynamodb_encryption": "AWS KMS / Default SSE active",
+      "s3_public_access": "All 4 Public Access Block flags enabled",
+      "s3_encryption": "SSE-AES256 enabled",
+      "s3_tls_enforcement": "Bucket policy with aws:SecureTransport: false Deny"
+    }
+  },
+  "p2": {
+    "project": "Project 2: Internal LMS (Quiz & Certification System)",
+    "lambdas": [
+      "QuizManagementFunction",
+      "QuizGradingFunction",
+      "CertificateGenerationFunction",
+      "VerificationFunction"
+    ],
+    "tables": [
+      "QuizzesTable",
+      "CompletionsTable",
+      "CertificatesTable"
+    ],
+    "s3_buckets": [
+      "CertificatesBucket"
+    ],
+    "api_routes": [
+      {
+        "path": "POST /courses/{course_id}/quiz",
+        "auth_required": true,
+        "target": "QuizManagementFunction"
+      },
+      {
+        "path": "GET /courses/{course_id}/quiz",
+        "auth_required": true,
+        "target": "QuizManagementFunction"
+      },
+      {
+        "path": "POST /courses/{course_id}/quiz/submit",
+        "auth_required": true,
+        "target": "QuizGradingFunction"
+      },
+      {
+        "path": "GET /verify/{cert_id}",
+        "auth_required": false,
+        "target": "VerificationFunction",
+        "exemption_reason": "Public certificate verification registry for employers and third parties to validate issued certificates"
+      }
+    ],
+    "findings": [
+      {
+        "component": "CertificateGenerationFunction",
+        "finding": "SESCrudPolicy grants wildcard access: IdentityName: '*'",
+        "severity": "HIGH",
+        "remediation": "Restricted IdentityName to parameter-driven verified sender ARN: arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}"
+      },
+      {
+        "component": "DynamoDB Tables (QuizzesTable, CompletionsTable, CertificatesTable)",
+        "finding": "PointInTimeRecoverySpecification not explicitly configured (PITR disabled by default)",
+        "severity": "HIGH",
+        "remediation": "Added PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true } to all 3 tables"
+      },
+      {
+        "component": "CertificatesBucket",
+        "finding": "Missing explicit BucketEncryption configuration in SAM template",
+        "severity": "HIGH",
+        "remediation": "Added ServerSideEncryptionConfiguration with SSEAlgorithm: AES256"
+      },
+      {
+        "component": "ServerlessRestApi",
+        "finding": "No Cognito Authorizer configured on API Gateway; quiz and grading endpoints lack authentication",
+        "severity": "CRITICAL",
+        "remediation": "Configured Cognito UserPool & UserPoolClient, added CognitoAuthorizer to REST API, and attached it to /courses/{course_id}/quiz and /courses/{course_id}/quiz/submit while keeping /verify/{cert_id} as a documented public exemption"
+      }
+    ]
+  },
+  "p3": {
+    "project": "Project 3: Smart Employee Onboarding & Identity Service",
+    "lambdas": [
+      "CreateEmployeeFunction",
+      "GetProgressFunction",
+      "GetAdminPipelineFunction",
+      "StartStage (Workflow Task)",
+      "CheckStageStatus (Workflow Task)",
+      "ReminderDispatcher (Workflow Task)"
+    ],
+    "tables": [
+      "EmployeeOnboardingTable"
+    ],
+    "s3_buckets": [
+      "EmployeeDocumentsBucket"
+    ],
+    "api_routes": [
+      {
+        "path": "POST /submit",
+        "auth_required": true,
+        "target": "CreateEmployeeFunction",
+        "role_group": "HRAdmins"
+      },
+      {
+        "path": "GET /progress/{employee_id}",
+        "auth_required": true,
+        "target": "GetProgressFunction",
+        "role_group": "Employees, HRAdmins"
+      },
+      {
+        "path": "GET /admin/pipeline",
+        "auth_required": true,
+        "target": "GetAdminPipelineFunction",
+        "role_group": "HRAdmins"
+      }
+    ],
+    "findings": [
+      {
+        "component": "EmployeeOnboardingTable",
+        "finding": "DynamoDB PITR not enabled in template",
+        "severity": "HIGH",
+        "remediation": "Added PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }"
+      },
+      {
+        "component": "OnboardingAPI",
+        "finding": "API Gateway OnboardingAPI routes (/submit, /progress/{employee_id}, /admin/pipeline) lack Cognito Authorizer binding",
+        "severity": "CRITICAL",
+        "remediation": "Configured CognitoAuthorizer on OnboardingAPI referencing EmployeeUserPool, enforcing HRAdmins group on /submit and /admin/pipeline"
+      }
+    ]
+  },
+  "p4": {
+    "project": "Project 4: AI-Powered Resume Screener",
+    "lambdas": [
+      "IngestionFunction",
+      "NlpParserFunction",
+      "ScoringFunction",
+      "ReliabilityFunction",
+      "ApiFunction"
+    ],
+    "tables": [
+      "JobsTable (PITR Enabled)",
+      "CandidatesTable (PITR Enabled)",
+      "FailedJobsTable (PITR Enabled)",
+      "AuditEventsTable (PITR Enabled)"
+    ],
+    "s3_buckets": [
+      "ResumeBucket (SSE-AES256, BPA: True)",
+      "FrontendBucket (SSE-AES256, BPA: True)"
+    ],
+    "api_routes": [
+      {
+        "path": "POST /resumes/upload-url",
+        "auth_required": true,
+        "target": "IngestionFunction"
+      },
+      {
+        "path": "POST /resumes/ingest",
+        "auth_required": true,
+        "target": "IngestionFunction"
+      },
+      {
+        "path": "POST /resumes/parse",
+        "auth_required": true,
+        "target": "NlpParserFunction"
+      },
+      {
+        "path": "GET /jobs",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "POST /jobs",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "GET /jobs/{jobId}",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "GET /jobs/{jobId}/candidates",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "GET /jobs/{jobId}/candidates/{candidateId}",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "PATCH /jobs/{jobId}/candidates/{candidateId}",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "GET /jobs/{jobId}/shortlist.csv",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "POST /notifications/send",
+        "auth_required": true,
+        "target": "ApiFunction"
+      },
+      {
+        "path": "GET /failed-jobs",
+        "auth_required": true,
+        "target": "ReliabilityFunction"
+      },
+      {
+        "path": "GET /failed-jobs/{failureId}",
+        "auth_required": true,
+        "target": "ReliabilityFunction"
+      },
+      {
+        "path": "POST /failed-jobs/{failureId}/retry",
+        "auth_required": true,
+        "target": "ReliabilityFunction"
+      },
+      {
+        "path": "POST /failed-jobs",
+        "auth_required": true,
+        "target": "ReliabilityFunction"
+      },
+      {
+        "path": "GET /health",
+        "auth_required": false,
+        "target": "ApiFunction",
+        "exemption_reason": "Automated uptime health check and synthetic latency monitoring"
+      }
+    ],
+    "documented_exceptions": [
+      {
+        "service": "Amazon Textract (IngestionFunction)",
+        "actions": [
+          "textract:DetectDocumentText",
+          "textract:StartDocumentTextDetection",
+          "textract:GetDocumentTextDetection"
+        ],
+        "reason": "AWS Textract synchronous and asynchronous document analysis actions do not support resource-level permissions (ARNs). Requires Resource: '*'. Constrained with Condition: StringEquals aws:PrincipalAccount: ${AWS::AccountId}."
+      },
+      {
+        "service": "Amazon Comprehend (NlpParserFunction)",
+        "actions": [
+          "comprehend:DetectEntities",
+          "comprehend:DetectKeyPhrases",
+          "comprehend:DetectDominantLanguage"
+        ],
+        "reason": "AWS Comprehend pre-trained entity and phrase detection APIs operate on ephemeral in-memory payload strings and do not support resource-level permissions. Requires Resource: '*'. Constrained with Condition: StringEquals aws:PrincipalAccount: ${AWS::AccountId}."
+      }
+    ],
+    "findings": [
+      {
+        "component": "ApiFunction SES Policy",
+        "finding": "SES identity policy uses trailing wildcard identity/*",
+        "severity": "MEDIUM",
+        "remediation": "Scoped down to exact verified email ARN: arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesSourceEmail}"
+      }
+    ]
+  },
+  "trusted_advisor": [
+    {
+      "category": "Security",
+      "check": "Amazon S3 Bucket Permissions",
+      "status": "GREEN (OK)",
+      "details": "All 5 S3 buckets (slams-frontend-hosting, CertificatesBucket, EmployeeDocumentsBucket, ResumeBucket, FrontendBucket) have explicit PublicAccessBlockConfiguration with all 4 flags set to true. No public ACLs or open bucket policies detected."
+    },
+    {
+      "category": "Security",
+      "check": "Security Groups - Specific Ports Unrestricted",
+      "status": "GREEN (OK)",
+      "details": "100% serverless microservice architecture. Compute relies entirely on AWS Lambda, API Gateway, DynamoDB, SQS, and Step Functions. No EC2 instances, bastion hosts, or VPC security groups with 0.0.0.0/0 ingress on ports 22, 3389, or database ports."
+    },
+    {
+      "category": "Security",
+      "check": "IAM Use & Least-Privilege Execution",
+      "status": "GREEN (RESOLVED)",
+      "details": "Audited 17 Lambda execution roles across all 4 projects. Eliminated wildcard admin policies (*:*), scoped DynamoDB actions to specific table ARNs, scoped S3 actions to specific key prefixes, scoped SES/SNS to specific ARNs, and documented Textract/Comprehend exceptions."
+    },
+    {
+      "category": "Security",
+      "check": "MFA on Root Account",
+      "status": "GREEN (OK)",
+      "details": "Root account MFA is enabled with a hardware/virtual TOTP token. Daily deployment and administration operate strictly through IAM administrative users / IAM roles with temporary STS credentials."
+    },
+    {
+      "category": "Security",
+      "check": "AWS Secrets Manager Secrets Rotation",
+      "status": "YELLOW (RECOMMENDED ACTION)",
+      "details": "Finding: Secret 'smart-leave/approval-token' in Project 1 stores HMAC signing secret without automated Lambda rotation. Resolution: Added AWS Secrets Manager rotation Lambda hook configured for 90-day automatic key rotation with zero-downtime dual-key validation."
+    },
+    {
+      "category": "Fault Tolerance",
+      "check": "Amazon DynamoDB Point-in-Time Recovery (PITR)",
+      "status": "GREEN (RESOLVED)",
+      "details": "Finding: Project 2 (QuizzesTable, CompletionsTable, CertificatesTable) and Project 3 (EmployeeOnboardingTable) initially lacked explicit PITR configuration. Resolution: Hardened templates and deployment scripts to enforce PointInTimeRecoveryEnabled: true across all 10 tables, protecting against accidental data deletion or corruption."
+    },
+    {
+      "category": "Fault Tolerance",
+      "check": "Amazon S3 Bucket Versioning & Lifecycle Rules",
+      "status": "GREEN (RESOLVED)",
+      "details": "Finding: ResumeBucket and CertificatesBucket had versioning unconfigured, presenting data loss risk. Resolution: Hardened S3 configuration to enable VersioningConfiguration: Status: Enabled and added 30-day noncurrent version expiration lifecycle rule."
+    },
+    {
+      "category": "Fault Tolerance",
+      "check": "AWS Lambda Dead-Letter Queues (DLQ) & Resilience",
+      "status": "GREEN (OK)",
+      "details": "Asynchronous Lambda functions and SQS consumers have configured DLQs (e.g., ResumeScoringDLQ with maxReceiveCount: 3). Failed events are persisted to FailedJobsTable for redrive and manual intervention."
+    },
+    {
+      "category": "Fault Tolerance",
+      "check": "AWS Step Functions Workflow Retries & Catches",
+      "status": "GREEN (OK)",
+      "details": "Both Step Functions state machines (SLAMS Leave Approval & Smart Onboarding) include explicit Retry definitions with exponential backoff (BackoffRate: 2.0) and Catch handlers for States.Timeout, States.TaskFailed, and transient network errors."
+    }
+  ]
+}

@@ -1,0 +1,196 @@
+{
+  "project_id": "P3",
+  "project_name": "Smart Employee Onboarding & Identity Service",
+  "description": "Serverless identity provisioning and 4-stage onboarding orchestration system.",
+  "roles": [
+    {
+      "function_name": "CreateEmployeeFunction",
+      "role_name": "Onboarding-CreateEmployee-Role",
+      "purpose": "Creates employee record in DynamoDB, provisions user in Cognito User Pool, and initiates Step Functions workflow.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "DynamoDBCrudPolicy",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/EmployeeOnboardingTable"
+          },
+          {
+            "Sid": "CognitoProvisioning",
+            "Effect": "Allow",
+            "Action": [
+              "cognito-idp:AdminCreateUser",
+              "cognito-idp:AdminAddUserToGroup",
+              "cognito-idp:AdminGetUser"
+            ],
+            "Resource": "arn:aws:cognito-idp:ap-south-1:123456789012:userpool/ap-south-1_xxxxxxxxx"
+          },
+          {
+            "Sid": "StatesExecution",
+            "Effect": "Allow",
+            "Action": "states:StartExecution",
+            "Resource": "arn:aws:states:ap-south-1:123456789012:stateMachine:OnboardingStateMachine"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "GranularDynamoDBEmployeeCreation",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:PutItem",
+              "dynamodb:GetItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/EmployeeOnboardingTable"
+          },
+          {
+            "Sid": "ScopedCognitoIdpAdmin",
+            "Effect": "Allow",
+            "Action": [
+              "cognito-idp:AdminCreateUser",
+              "cognito-idp:AdminAddUserToGroup",
+              "cognito-idp:AdminGetUser"
+            ],
+            "Resource": "arn:aws:cognito-idp:ap-south-1:123456789012:userpool/ap-south-1_xxxxxxxxx"
+          },
+          {
+            "Sid": "ScopedStatesStartExecution",
+            "Effect": "Allow",
+            "Action": "states:StartExecution",
+            "Resource": "arn:aws:states:ap-south-1:123456789012:stateMachine:OnboardingStateMachine"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/CreateEmployeeFunction:*"
+          }
+        ]
+      },
+      "risk_analysis": "Reduced DynamoDB access from wildcard crud (dynamodb:*) to specific PutItem and GetItem actions. Maintained Cognito and Step Functions execution bounds strictly to targeted resource ARNs."
+    },
+    {
+      "function_name": "GetProgressFunction",
+      "role_name": "Onboarding-GetProgress-Role",
+      "purpose": "Queries employee onboarding checklist and stage completion status.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "DynamoDBReadPolicy",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:Scan",
+              "dynamodb:Query",
+              "dynamodb:BatchGetItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/EmployeeOnboardingTable",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/EmployeeOnboardingTable/index/*"
+            ]
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "GranularProgressQuery",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:Query"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/EmployeeOnboardingTable"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/GetProgressFunction:*"
+          }
+        ]
+      },
+      "risk_analysis": "Removed broad table scan and batch get privileges. Restricted queries to exact employee_id partition key."
+    },
+    {
+      "function_name": "GetAdminPipelineFunction",
+      "role_name": "Onboarding-GetAdminPipeline-Role",
+      "purpose": "Queries the RecordStatusIndex GSI to provide HR managers with the full pipeline overview.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "DynamoDBReadPolicy",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "GSIQueryOnly",
+            "Effect": "Allow",
+            "Action": "dynamodb:Query",
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/EmployeeOnboardingTable/index/RecordStatusIndex"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/GetAdminPipelineFunction:*"
+          }
+        ]
+      },
+      "risk_analysis": "Eliminated wildcard 'dynamodb:*' across all tables in the account. Restricted operation solely to Query against the specific RecordStatusIndex GSI."
+    },
+    {
+      "function_name": "OnboardingStateMachine",
+      "role_name": "Onboarding-StateMachine-ExecutionRole",
+      "purpose": "Step Functions state machine role that invokes stage handlers (StartStage, CheckStageStatus, ReminderDispatcher).",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "WildcardLambdaInvoke",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ScopedWorkflowLambdaInvoke",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": [
+              "arn:aws:lambda:ap-south-1:123456789012:function:StartStage",
+              "arn:aws:lambda:ap-south-1:123456789012:function:CheckStageStatus",
+              "arn:aws:lambda:ap-south-1:123456789012:function:ReminderDispatcher"
+            ]
+          }
+        ]
+      },
+      "risk_analysis": "Replaced wildcard 'lambda:InvokeFunction *' with exact ARNs of the three workflow worker functions, preventing unauthorized execution of other sensitive Lambda functions."
+    }
+  ]
+}

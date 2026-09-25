@@ -1,0 +1,265 @@
+{
+  "project_id": "P2",
+  "project_name": "Internal LMS (Quiz & Certification Subsystem)",
+  "description": "Serverless learning management system assessing skills and issuing verifiable certificates.",
+  "roles": [
+    {
+      "function_name": "QuizManagementFunction",
+      "role_name": "LMS-QuizManagement-Role",
+      "purpose": "Creates, updates, and retrieves quiz questions and answer keys for courses.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "SAMDynamoDBCrudPolicy",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:DeleteItem",
+              "dynamodb:PutItem",
+              "dynamodb:Scan",
+              "dynamodb:Query",
+              "dynamodb:UpdateItem",
+              "dynamodb:BatchWriteItem",
+              "dynamodb:BatchGetItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/QuizzesTable",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/QuizzesTable/index/*"
+            ]
+          },
+          {
+            "Sid": "LambdaBasicLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogGroup",
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:*:*:*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "GranularQuizManagement",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:Query",
+              "dynamodb:PutItem",
+              "dynamodb:UpdateItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/QuizzesTable"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/QuizManagementFunction:*"
+          }
+        ]
+      },
+      "risk_analysis": "Removed broad BatchWriteItem, DeleteItem, and Scan privileges; removed wildcard log resource 'arn:aws:logs:*:*:*', scoping log streams to function-specific log group."
+    },
+    {
+      "function_name": "QuizGradingFunction",
+      "role_name": "LMS-QuizGrading-Role",
+      "purpose": "Grades employee quiz submissions, records completions, and synchronously invokes CertificateGenerationFunction on passing.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "CompletionsCrud",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/CompletionsTable"
+          },
+          {
+            "Sid": "QuizzesRead",
+            "Effect": "Allow",
+            "Action": "dynamodb:GetItem",
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/QuizzesTable"
+          },
+          {
+            "Sid": "WildcardInvoke",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "GranularCompletionsAccess",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:PutItem",
+              "dynamodb:GetItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/CompletionsTable"
+          },
+          {
+            "Sid": "GranularQuizzesRead",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:Query"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/QuizzesTable"
+          },
+          {
+            "Sid": "ScopedCertificateLambdaInvoke",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": "arn:aws:lambda:ap-south-1:123456789012:function:CertificateGenerationFunction"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/QuizGradingFunction:*"
+          }
+        ]
+      },
+      "risk_analysis": "Eliminated account-wide 'lambda:InvokeFunction *' vulnerability, which could allow invoking arbitrary administrative or destructive Lambdas. Scoped target function strictly to CertificateGenerationFunction ARN."
+    },
+    {
+      "function_name": "CertificateGenerationFunction",
+      "role_name": "LMS-CertificateGeneration-Role",
+      "purpose": "Generates PDF certificates, stores them in S3, records metadata in DynamoDB, and dispatches credential emails via SES.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "CertificatesCrud",
+            "Effect": "Allow",
+            "Action": "dynamodb:*",
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/CertificatesTable"
+          },
+          {
+            "Sid": "S3CrudPolicy",
+            "Effect": "Allow",
+            "Action": [
+              "s3:GetObject",
+              "s3:PutObject",
+              "s3:DeleteObject",
+              "s3:ListBucket"
+            ],
+            "Resource": [
+              "arn:aws:s3:::lms-certificates-bucket",
+              "arn:aws:s3:::lms-certificates-bucket/*"
+            ]
+          },
+          {
+            "Sid": "SESWildcardCrudPolicy",
+            "Effect": "Allow",
+            "Action": [
+              "ses:SendEmail",
+              "ses:SendRawEmail",
+              "ses:GetIdentityVerificationAttributes"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "GranularCertificatesTable",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:PutItem",
+              "dynamodb:GetItem"
+            ],
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/CertificatesTable"
+          },
+          {
+            "Sid": "ScopedS3CertificatesPrefixOnly",
+            "Effect": "Allow",
+            "Action": [
+              "s3:PutObject",
+              "s3:GetObject"
+            ],
+            "Resource": "arn:aws:s3:::lms-certificates-bucket/certificates/*"
+          },
+          {
+            "Sid": "ScopedSESVerifiedSender",
+            "Effect": "Allow",
+            "Action": [
+              "ses:SendEmail",
+              "ses:SendRawEmail"
+            ],
+            "Resource": "arn:aws:ses:ap-south-1:123456789012:identity/cert-issuer@company.com"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/CertificateGenerationFunction:*"
+          }
+        ]
+      },
+      "risk_analysis": "Fixed CRITICAL wildcard SES violation: replaced 'IdentityName: *' with the specific verified SES sender ARN. Removed s3:DeleteObject and scoped bucket operations strictly to the 'certificates/*' prefix rather than bucket root."
+    },
+    {
+      "function_name": "VerificationFunction",
+      "role_name": "LMS-Verification-Role",
+      "purpose": "Public read-only verification endpoint validating certificate authenticity.",
+      "before_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "DynamoDBReadPolicy",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:GetItem",
+              "dynamodb:Scan",
+              "dynamodb:Query",
+              "dynamodb:BatchGetItem"
+            ],
+            "Resource": [
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/CertificatesTable",
+              "arn:aws:dynamodb:ap-south-1:123456789012:table/CertificatesTable/index/*"
+            ]
+          }
+        ]
+      },
+      "after_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "StrictGetItemOnly",
+            "Effect": "Allow",
+            "Action": "dynamodb:GetItem",
+            "Resource": "arn:aws:dynamodb:ap-south-1:123456789012:table/CertificatesTable"
+          },
+          {
+            "Sid": "ScopedLogs",
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:ap-south-1:123456789012:log-group:/aws/lambda/VerificationFunction:*"
+          }
+        ]
+      },
+      "risk_analysis": "Revoked Scan and BatchGetItem on public-facing verification Lambda, preventing table-scraping / denial-of-wallet attacks. The function can now only retrieve a single certificate record by exact partition key."
+    }
+  ]
+}

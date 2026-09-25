@@ -1,0 +1,236 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Smart Employee Onboarding & Identity Service - Hardened Production Backend (Sprint 5)
+  Audited & Hardened by: Sasikumar (Sasi) — Cloud Architect & Security Specialist
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 128
+    Runtime: nodejs20.x
+    Architectures:
+      - x86_64
+    Tracing: Active
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref EmployeeOnboardingTable
+        USER_POOL_ID: !Ref EmployeeUserPool
+        EMPLOYEES_GROUP: Employees
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # COGNITO IDENTITY SPINE: User Pool & Client (Hardened)
+  # ---------------------------------------------------------------------------
+  EmployeeUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: SmartEmployeeUserPool-Prod
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: employee_id
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: department
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+
+  EmployeeUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: SmartEmployeeWebClient-Prod
+      UserPoolId: !Ref EmployeeUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+
+  EmployeesGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Employees
+      Description: Group for onboarding employees and new hires
+      UserPoolId: !Ref EmployeeUserPool
+
+  HRAdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: HRAdmins
+      Description: Group for HR Administrators with dashboard access
+      UserPoolId: !Ref EmployeeUserPool
+
+  # ---------------------------------------------------------------------------
+  # DYNAMODB TABLE (Hardened: PITR & KMS Encryption)
+  # ---------------------------------------------------------------------------
+  EmployeeOnboardingTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: EmployeeOnboardingTable-Prod
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: employee_id
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: record_status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: employee_id
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: RecordStatusIndex
+          KeySchema:
+            - AttributeName: record_status
+              KeyType: HASH
+            - AttributeName: sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # API GATEWAY (Hardened: Cognito Authorizer on all Protected Routes)
+  # ---------------------------------------------------------------------------
+  OnboardingAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'https://onboarding.internal.company.com'"
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt EmployeeUserPool.Arn
+            Identity:
+              Header: Authorization
+
+  # ---------------------------------------------------------------------------
+  # LAMBDA FUNCTIONS (Hardened: Least-Privilege IAM & Role-Group Enforcement)
+  # ---------------------------------------------------------------------------
+  CreateEmployeeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/createEmployee.handler
+      Description: Creates employee record, provisions Cognito account, and starts workflow
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt EmployeeOnboardingTable.Arn
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminAddUserToGroup
+                - cognito-idp:AdminGetUser
+              Resource: !GetAtt EmployeeUserPool.Arn
+            - Effect: Allow
+              Action: states:StartExecution
+              Resource: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:OnboardingStateMachine"
+      Events:
+        SubmitApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingAPI
+            Path: /submit
+            Method: post
+            Auth:
+              Authorizer: CognitoAuth
+
+  GetProgressFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/getProgress.handler
+      Description: Retrieves onboarding progress for an authenticated employee or HR Admin
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+              Resource: !GetAtt EmployeeOnboardingTable.Arn
+      Events:
+        ProgressApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingAPI
+            Path: /progress/{employee_id}
+            Method: get
+            Auth:
+              Authorizer: CognitoAuth
+
+  GetAdminPipelineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/getAdminPipeline.handler
+      Description: Retrieves HR pipeline of all onboarding employees (HRAdmins only)
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource: !Sub "${EmployeeOnboardingTable.Arn}/index/RecordStatusIndex"
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt EmployeeOnboardingTable.Arn
+      Events:
+        AdminPipelineApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingAPI
+            Path: /admin/pipeline
+            Method: get
+            Auth:
+              Authorizer: CognitoAuth
+
+Outputs:
+  ApiEndpoint:
+    Description: "Hardened API Gateway endpoint URL"
+    Value: !Sub "https://${OnboardingAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref EmployeeUserPool
+  UserPoolClientId:
+    Description: "Cognito User Pool App Client ID"
+    Value: !Ref EmployeeUserPoolClient
